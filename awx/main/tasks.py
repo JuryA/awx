@@ -2074,13 +2074,18 @@ class RunInventoryUpdate(BaseTask):
     def build_env(self, inventory_update, **kwargs):
         """Build environment dictionary for inventory import.
 
-        This is the mechanism by which any data that needs to be passed
+        This used to be the mechanism by which any data that needs to be passed
         to the inventory update script is set up. In particular, this is how
         inventory update is aware of its proper credentials.
+
+        Most environment injection is now accomplished by the credential
+        injectors. The primary purpose this still serves is to
+        still point to the inventory update INI or config file.
         """
         env = super(RunInventoryUpdate, self).build_env(inventory_update,
                                                         **kwargs)
         env = self.add_awx_venv(env)
+        env = self.add_ansible_venv(inventory_update.ansible_virtualenv_path, env, **kwargs)
         # Pass inventory source ID to inventory script.
         env['INVENTORY_SOURCE_ID'] = str(inventory_update.inventory_source_id)
         env['INVENTORY_UPDATE_ID'] = str(inventory_update.pk)
@@ -2112,25 +2117,19 @@ class RunInventoryUpdate(BaseTask):
                 inventory_update.get_cloud_credential(), ''
             )
 
-        if inventory_update.source == 'gce':
-            env['GCE_ZONE'] = inventory_update.source_regions if inventory_update.source_regions != 'all' else ''  # noqa
+        if inventory_update.source in InventorySource.injectors:
+            # TODO: mapping from credential.kind to inventory_source.source
+            injector = InventorySource.injectors[inventory_update.source](kwargs['ansible_version'])
+            env = injector.build_env(inventory_update, env, kwargs['private_data_dir'])
 
-            # by default, the GCE inventory source caches results on disk for
-            # 5 minutes; disable this behavior
-            cp = configparser.ConfigParser()
-            cp.add_section('cache')
-            cp.set('cache', 'cache_max_age', '0')
-            handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
-            cp.write(os.fdopen(handle, 'w'))
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-            env['GCE_INI_PATH'] = path
-        elif inventory_update.source in ['scm', 'custom']:
+        if inventory_update.source == 'tower':
+            env['TOWER_INVENTORY'] = inventory_update.instance_filters
+            env['TOWER_LICENSE_TYPE'] = get_licenser().validate()['license_type']
+
+        if inventory_update.source in ['scm', 'custom']:
             for env_k in inventory_update.source_vars_dict:
                 if str(env_k) not in env and str(env_k) not in settings.INV_ENV_VARIABLE_BLACKLIST:
                     env[str(env_k)] = str(inventory_update.source_vars_dict[env_k])
-        elif inventory_update.source == 'tower':
-            env['TOWER_INVENTORY'] = inventory_update.instance_filters
-            env['TOWER_LICENSE_TYPE'] = get_licenser().validate()['license_type']
         elif inventory_update.source == 'file':
             raise NotImplementedError('Cannot update file sources through the task system.')
         # add private_data_files
@@ -2188,33 +2187,65 @@ class RunInventoryUpdate(BaseTask):
                         getattr(settings, '%s_INSTANCE_ID_VAR' % src.upper()),])
         # Add arguments for the source inventory script
         args.append('--source')
-        if src in CLOUD_PROVIDERS:
-            # Get the path to the inventory plugin, and append it to our
-            # arguments.
-            plugin_path = self.get_path_to('..', 'plugins', 'inventory',
-                                           '%s.py' % src)
-            args.append(plugin_path)
-        elif src == 'scm':
-            args.append(inventory_update.get_actual_source_path())
-        elif src == 'custom':
-            handle, path = tempfile.mkstemp(dir=kwargs['private_data_dir'])
-            f = os.fdopen(handle, 'w')
-            if inventory_update.source_script is None:
-                raise RuntimeError('Inventory Script does not exist')
-            f.write(inventory_update.source_script.script)
-            f.close()
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-            args.append(path)
+        args.append(self.build_inventory(inventory_update, **kwargs))
+        if src == 'custom':
             args.append("--custom")
         args.append('-v%d' % inventory_update.verbosity)
         if settings.DEBUG:
             args.append('--traceback')
         return args
 
+    def build_inventory(self, inventory_update, **kwargs):
+        src = inventory_update.source
+        # If called via build_safe_args, do not re-create file
+        if getattr(self, '_inventory_path', False):
+            return self._inventory_path
+        if src in CLOUD_PROVIDERS:
+            if src in InventorySource.injectors:
+                cloud_cred = inventory_update.get_cloud_credential()
+                injector = InventorySource.injectors[cloud_cred.kind](kwargs['ansible_version'])
+                content = injector.inventory_contents(inventory_update)
+                content = content.encode('utf-8')
+                # must be a statically named file
+                inventory_path = os.path.join(kwargs['private_data_dir'], injector.filename)
+                with open(inventory_path, 'w') as f:
+                    f.write(content)
+                os.chmod(inventory_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            else:
+                # Get the path to the inventory plugin, and append it to our
+                # arguments.
+                inventory_path = self.get_path_to('..', 'plugins', 'inventory', '%s.py' % src)
+        elif src == 'scm':
+            inventory_path = inventory_update.get_actual_source_path()
+        elif src == 'custom':
+            handle, inventory_path = tempfile.mkstemp(dir=kwargs['private_data_dir'])
+            f = os.fdopen(handle, 'w')
+            if inventory_update.source_script is None:
+                raise RuntimeError('Inventory Script does not exist')
+            f.write(inventory_update.source_script.script)
+            f.close()
+            os.chmod(inventory_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        self._inventory_path = inventory_path
+        return inventory_path
+
     def build_cwd(self, inventory_update, **kwargs):
-        if inventory_update.source == 'scm' and inventory_update.source_project_update:
+        '''
+        There are two cases where the inventory "source" is in a different
+        location from the private data:
+         - deprecated vendored inventory scripts in awx/plugins/inventory
+         - SCM, where source needs to live in the project folder
+        in these cases, the inventory does not exist in the standard tempdir
+        '''
+        src = inventory_update.source
+        if src == 'scm' and inventory_update.source_project_update:
             return inventory_update.source_project_update.get_project_path(check_if_exists=False)
-        return self.get_path_to('..', 'plugins', 'inventory')
+        if src in CLOUD_PROVIDERS:
+            injector = None
+            if src in InventorySource.injectors:
+                injector = InventorySource.injectors[src](kwargs['ansible_version'])
+            if (not injector) or (not injector.should_use_plugin()):
+                return self.get_path_to('..', 'plugins', 'inventory')
+        return kwargs['private_data_dir']
 
     def get_idle_timeout(self):
         return getattr(settings, 'INVENTORY_UPDATE_IDLE_TIMEOUT', None)
