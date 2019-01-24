@@ -1989,7 +1989,7 @@ class RunInventoryUpdate(BaseTask):
             return self._inventory_path
         if src in CLOUD_PROVIDERS:
             if src in InventorySource.injectors:
-                injector = InventorySource.injectors[inventory_update.source](kwargs['ansible_version'])
+                injector = InventorySource.injectors[src](kwargs['ansible_version'])
                 if injector.should_use_plugin():
                     content = injector.inventory_contents(inventory_update, kwargs['private_data_dir'])
                     # must be a statically named file
