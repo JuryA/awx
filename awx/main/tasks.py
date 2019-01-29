@@ -1011,8 +1011,8 @@ class BaseTask(object):
             if isinstance(instance, Job):
                 credentials = instance.credentials.all()
             elif isinstance(instance, InventoryUpdate):
-                # TODO: allow multiple custom creds for inv updates
-                credentials = [instance.get_cloud_credential()]
+                # All credentials not used by inventory source injector
+                credentials = instance.get_extra_credentials()
             elif isinstance(instance, Project):
                 # once (or if) project updates
                 # move from a .credential -> .credentials model, we can
@@ -1865,6 +1865,10 @@ class RunInventoryUpdate(BaseTask):
 
         If no private data is needed, return None.
         """
+        if inventory_update.source in InventorySource.injectors:
+            injector = InventorySource.injectors[inventory_update.source](kwargs['ansible_version'])
+            return injector.build_private_data(inventory_update, kwargs.get('private_data_dir', None))
+
         private_data = {'credentials': {}}
         credential = inventory_update.get_cloud_credential()
 
@@ -2201,10 +2205,9 @@ class RunInventoryUpdate(BaseTask):
             return self._inventory_path
         if src in CLOUD_PROVIDERS:
             if src in InventorySource.injectors:
-                cloud_cred = inventory_update.get_cloud_credential()
-                injector = InventorySource.injectors[cloud_cred.kind](kwargs['ansible_version'])
+                injector = InventorySource.injectors[inventory_update.source](kwargs['ansible_version'])
                 if injector.should_use_plugin():
-                    content = injector.inventory_contents(inventory_update)
+                    content = injector.inventory_contents(inventory_update, kwargs['private_data_dir'])
                     # must be a statically named file
                     inventory_path = os.path.join(kwargs['private_data_dir'], injector.filename)
                     with open(inventory_path, 'w') as f:
