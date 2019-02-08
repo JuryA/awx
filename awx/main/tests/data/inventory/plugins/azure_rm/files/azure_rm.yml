@@ -1,0 +1,20 @@
+default_host_filters: []
+hostvar_expressions:
+  computer_name: name
+  private_ip: private_ipv4_addresses | json_query("[0]")
+  provisioning_state: provisioning_state | title
+  type: resource_type
+keyed_groups:
+- key: location
+  prefix: ''
+  separator: ''
+- key: powerstate
+  prefix: ''
+  separator: ''
+- key: name
+  prefix: ''
+  separator: ''
+plugin: azure_rm
+regions:
+- southcentralus
+- westus

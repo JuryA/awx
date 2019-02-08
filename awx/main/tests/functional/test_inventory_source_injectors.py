@@ -18,7 +18,7 @@ TEST_SOURCE_FIELDS = {
     },
     'ec2': {
         'instance_filters': 'foobaa',
-        'group_by': 'fouo',
+        'group_by': 'availability_zone,instance_type',  # has defined choices
         'source_regions': 'us-east-2,ap-south-1'
     },
     'gce': {
@@ -27,6 +27,9 @@ TEST_SOURCE_FIELDS = {
     'azure_rm': {
         'source_regions': 'southcentralus,westus'
     },
+    'tower': {
+        'instance_filters': '42'
+    }
 }
 
 INI_TEST_VARS = {
@@ -111,12 +114,20 @@ def fake_credential_factory(source):
     )
 
 
-def read_content(private_data_dir, env, inventory_update):
+def read_content(private_data_dir, raw_env, inventory_update):
     """Read the environmental data laid down by the task system
     template out private and secret data so they will be readable and predictable
     return a dictionary `content` with file contents, keyed off environment variable
         that references the file
     """
+    # Filter out environment variables which come from runtime environment
+    env = {}
+    exclude_keys = set(('PATH', 'INVENTORY_SOURCE_ID', 'INVENTORY_UPDATE_ID'))
+    for k, v in raw_env.items():
+        if k.startswith('ANSIBLE_') or k in exclude_keys:
+            continue
+        if k not in os.environ or v != os.environ[k]:
+            env[k] = v
     inverse_env = {}
     for key, value in env.items():
         inverse_env[value] = key
@@ -131,7 +142,9 @@ def read_content(private_data_dir, env, inventory_update):
     for filename in os.listdir(private_data_dir):
         abs_file_path = os.path.join(private_data_dir, filename)
         if abs_file_path in inverse_env:
-            references[abs_file_path] = inverse_env[abs_file_path]
+            env_key = inverse_env[abs_file_path]
+            references[abs_file_path] = env_key
+            env[env_key] = '{{ file_reference }}'
         try:
             with open(abs_file_path, 'r') as f:
                 dir_contents[abs_file_path] = f.read()
@@ -181,21 +194,28 @@ def read_content(private_data_dir, env, inventory_update):
         file_content = private_key_regex.sub('{{private_key}}', file_content)
         content[reference_key] = file_content
 
-    return content
+    return (env, content)
 
 
-def create_reference_data(ref_dir, content):
-    if not os.path.exists(ref_dir):
-        os.mkdir(ref_dir)
-    for env_name, content in content.items():
-        with open(os.path.join(ref_dir, env_name), 'w') as f:
-            f.write(content)
+def create_reference_data(source_dir, env, content):
+    if not os.path.exists(source_dir):
+        os.mkdir(source_dir)
+    if content:
+        files_dir = os.path.join(source_dir, 'files')
+        if not os.path.exists(files_dir):
+            os.mkdir(files_dir)
+        for env_name, content in content.items():
+            with open(os.path.join(files_dir, env_name), 'w') as f:
+                f.write(content)
+    if env:
+        with open(os.path.join(source_dir, 'env.json'), 'w') as f:
+            f.write(json.dumps(env, indent=4))
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize('this_kind', CLOUD_PROVIDERS)
 @pytest.mark.parametrize('script_or_plugin', ['scripts', 'plugins'])
-def test_inventory_script_structure(this_kind, script_or_plugin, inventory):
+def test_inventory_update_injected_content(this_kind, script_or_plugin, inventory):
     src_vars = dict(base_source_var='value_of_var')
     if this_kind in INI_TEST_VARS:
         src_vars.update(INI_TEST_VARS[this_kind])
@@ -219,36 +239,46 @@ def test_inventory_script_structure(this_kind, script_or_plugin, inventory):
         elif InventorySource.injectors[this_kind].initial_version is None:
             pytest.skip('Use of inventory plugin is not enabled for this source')
 
-    def substitute_run(args, cwd, env, stdout_handle, **_kw):
+    def substitute_run(args, cwd, call_env, stdout_handle, **_kw):
         """This method will replace run_pexpect
         instead of running, it will read the private data directory contents
         It will make assertions that the contents are correct
         If MAKE_INVENTORY_REFERENCE_FILES is set, it will produce reference files
         """
-        private_data_dir = env['AWX_PRIVATE_DATA_DIR']
+        private_data_dir = call_env.pop('AWX_PRIVATE_DATA_DIR')
         set_files = bool(os.getenv("MAKE_INVENTORY_REFERENCE_FILES", 'false').lower()[0] not in ['f', '0'])
-        content = read_content(private_data_dir, env, inventory_update)
+        env, content = read_content(private_data_dir, call_env, inventory_update)
         base_dir = os.path.join(DATA, script_or_plugin)
         if not os.path.exists(base_dir):
             os.mkdir(base_dir)
-        ref_dir = os.path.join(base_dir, this_kind)  # this_kind is a global
+        source_dir = os.path.join(base_dir, this_kind)  # this_kind is a global
         if set_files:
-            create_reference_data(ref_dir, content)
+            create_reference_data(source_dir, env, content)
             pytest.skip('You set MAKE_INVENTORY_REFERENCE_FILES, so this created files, unset to run actual test.')
         else:
-            try:
-                expected_file_list = os.listdir(ref_dir)
-            except FileNotFoundError as e:
+            if not os.path.exists(source_dir):
                 raise FileNotFoundError(
                     'Maybe you never made reference files? '
                     'MAKE_INVENTORY_REFERENCE_FILES=true py.test ...\noriginal: {}'.format(e))
+            files_dir = os.path.join(source_dir, 'files')
+            try:
+                expected_file_list = os.listdir(files_dir)
+            except FileNotFoundError:
+                expected_file_list = []
             assert set(expected_file_list) == set(content.keys()), (
                 'Inventory update runtime environment does not have expected files'
             )
             for f_name in expected_file_list:
-                with open(os.path.join(ref_dir, f_name), 'r') as f:
+                with open(os.path.join(files_dir, f_name), 'r') as f:
                     ref_content = f.read()
                     assert content[f_name] == ref_content
+            try:
+                with open(os.path.join(source_dir, 'env.json'), 'r') as f:
+                    ref_env_text = f.read()
+                    ref_env = json.loads(ref_env_text)
+            except FileNotFoundError:
+                ref_env = {}
+            assert env == ref_env
         return ('successful', 0)
 
     # Mock this so that it will not send events to the callback receiver

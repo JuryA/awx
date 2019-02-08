@@ -27,7 +27,6 @@ from awx.main.models.inventory import (
     Host
 )
 from awx.main.utils.mem_inventory import MemInventory, dict_to_mem_data
-from awx.main.utils.ansible import filter_non_json_lines
 
 # other AWX imports
 from awx.main.models.rbac import batch_role_ancestor_rebuilding
@@ -174,21 +173,15 @@ class AnsibleInventoryLoader(object):
             cmd = self.get_proot_args(cmd, env)
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-        raw_stdout, stderr = proc.communicate()
-        raw_stdout = smart_text(raw_stdout)
+        stdout, stderr = proc.communicate()
+        stdout = smart_text(stdout)
         stderr = smart_text(stderr)
 
         if self.tmp_private_dir:
             shutil.rmtree(self.tmp_private_dir, True)
         if proc.returncode != 0:
             raise RuntimeError('%s failed (rc=%d) with stdout:\n%s\nstderr:\n%s' % (
-                self.method, proc.returncode, raw_stdout, stderr))
-
-        # Openstack inventory plugin gives non-JSON lines
-        # Also, running with higher verbosity gives non-JSON lines
-        stdout = filter_non_json_lines(raw_stdout)
-        if stdout is not raw_stdout:
-            logger.warning('Output had lines stripped to obtain JSON format.')
+                self.method, proc.returncode, stdout, stderr))
 
         for line in stderr.splitlines():
             logger.error(line)

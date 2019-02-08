@@ -126,9 +126,10 @@ def test_openstack_client_config_generation(mocker, source, expected):
     inventory_update = mocker.Mock(**{
         'source': 'openstack',
         'source_vars_dict': {},
-        'get_cloud_credential': cred_method
+        'get_cloud_credential': cred_method,
+        'get_extra_credentials': lambda x: []
     })
-    cloud_config = update.build_private_data(inventory_update)
+    cloud_config = update.build_private_data(inventory_update, **{'ansible_version': '2.7.7'})
     cloud_credential = yaml.load(
         cloud_config.get('credentials')[credential]
     )
@@ -167,9 +168,10 @@ def test_openstack_client_config_generation_with_private_source_vars(mocker, sou
     inventory_update = mocker.Mock(**{
         'source': 'openstack',
         'source_vars_dict': {'private': source},
-        'get_cloud_credential': cred_method
+        'get_cloud_credential': cred_method,
+        'get_extra_credentials': lambda x: []
     })
-    cloud_config = update.build_private_data(inventory_update)
+    cloud_config = update.build_private_data(inventory_update, **{'ansible_version': '2.7.7'})
     cloud_credential = yaml.load(
         cloud_config.get('credentials')[credential]
     )
@@ -1816,6 +1818,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
     def test_source_without_credential(self, mocker):
         self.instance.source = 'ec2'
         self.instance.get_cloud_credential = mocker.Mock(return_value=None)
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -1845,7 +1848,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         if with_credential:
             azure_rm = CredentialType.defaults['azure_rm']()
 
-            def get_cred():
+            def get_creds():
                 cred = Credential(
                     pk=1,
                     credential_type=azure_rm,
@@ -1856,10 +1859,11 @@ class TestInventoryUpdateCredentials(TestJobExecution):
                         'subscription': 'some-subscription',
                     }
                 )
-                return cred
-            self.instance.get_cloud_credential = get_cred
+                return [cred]
+            self.instance.get_extra_credentials = get_creds
         else:
-            self.instance.get_cloud_credential = mocker.Mock(return_value=None)
+            self.instance.get_extra_credentials = mocker.Mock(return_value=[])
+        self.instance.get_cloud_credential = mocker.Mock(return_value=None)
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -1876,9 +1880,9 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             return ['successful', 0]
 
         self.run_pexpect.side_effect = run_pexpect_side_effect
-        self.task.run(self.pk)
+        self.task.run(self.pk, **{'ansible_version': '2.7.7'})
 
-    def test_ec2_source(self):
+    def test_ec2_source(self, mocker):
         aws = CredentialType.defaults['aws']()
         self.instance.source = 'ec2'
 
@@ -1891,6 +1895,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             cred.inputs['password'] = encrypt_field(cred, 'password')
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -1908,7 +1913,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.task.run(self.pk)
         assert self.instance.job_env['AWS_SECRET_ACCESS_KEY'] == tasks.HIDDEN_PASSWORD
 
-    def test_vmware_source(self):
+    def test_vmware_source(self, mocker):
         vmware = CredentialType.defaults['vmware']()
         self.instance.source = 'vmware'
 
@@ -1921,6 +1926,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             cred.inputs['password'] = encrypt_field(cred, 'password')
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -1935,7 +1941,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.run_pexpect.side_effect = run_pexpect_side_effect
         self.task.run(self.pk)
 
-    def test_azure_rm_source_with_tenant(self):
+    def test_azure_rm_source_with_tenant(self, mocker):
         azure_rm = CredentialType.defaults['azure_rm']()
         self.instance.source = 'azure_rm'
         self.instance.source_regions = 'north, south, east, west'
@@ -1954,6 +1960,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
         self.instance.source_vars = {
             'include_powerstate': 'yes',
             'group_by_resource_group': 'no'
@@ -1981,7 +1988,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.task.run(self.pk)
         assert self.instance.job_env['AZURE_SECRET'] == tasks.HIDDEN_PASSWORD
 
-    def test_azure_rm_source_with_password(self):
+    def test_azure_rm_source_with_password(self, mocker):
         azure_rm = CredentialType.defaults['azure_rm']()
         self.instance.source = 'azure_rm'
         self.instance.source_regions = 'all'
@@ -1999,6 +2006,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
         self.instance.source_vars = {
             'include_powerstate': 'yes',
             'group_by_resource_group': 'no',
@@ -2026,7 +2034,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.task.run(self.pk)
         assert self.instance.job_env['AZURE_PASSWORD'] == tasks.HIDDEN_PASSWORD
 
-    def test_gce_source(self):
+    def test_gce_source(self, mocker):
         gce = CredentialType.defaults['gce']()
         self.instance.source = 'gce'
         self.instance.source_regions = 'all'
@@ -2046,6 +2054,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         expected_gce_zone = ''
 
@@ -2074,7 +2083,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             expected_gce_zone = 'us-east-4'
             self.task.run(self.pk)
 
-    def test_openstack_source(self):
+    def test_openstack_source(self, mocker):
         openstack = CredentialType.defaults['openstack']()
         self.instance.source = 'openstack'
 
@@ -2095,6 +2104,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -2114,7 +2124,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.run_pexpect.side_effect = run_pexpect_side_effect
         self.task.run(self.pk)
 
-    def test_satellite6_source(self):
+    def test_satellite6_source(self, mocker):
         satellite6 = CredentialType.defaults['satellite6']()
         self.instance.source = 'satellite6'
 
@@ -2133,6 +2143,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         self.instance.source_vars = '{"satellite6_group_patterns": "[a,b,c]", "satellite6_group_prefix": "hey_", "satellite6_want_hostcollections": True}'
 
@@ -2151,7 +2162,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.run_pexpect.side_effect = run_pexpect_side_effect
         self.task.run(self.pk)
 
-    def test_cloudforms_source(self):
+    def test_cloudforms_source(self, mocker):
         cloudforms = CredentialType.defaults['cloudforms']()
         self.instance.source = 'cloudforms'
 
@@ -2170,6 +2181,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         self.instance.source_vars = '{"prefer_ipv4": True}'
 
@@ -2192,7 +2204,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.task.run(self.pk)
 
     @pytest.mark.parametrize('verify', [True, False])
-    def test_tower_source(self, verify):
+    def test_tower_source(self, verify, mocker):
         tower = CredentialType.defaults['tower']()
         self.instance.source = 'tower'
         self.instance.instance_filters = '12345'
@@ -2208,6 +2220,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             cred.inputs['password'] = encrypt_field(cred, 'password')
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -2225,7 +2238,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.task.run(self.pk)
         assert self.instance.job_env['TOWER_PASSWORD'] == tasks.HIDDEN_PASSWORD
 
-    def test_tower_source_ssl_verify_empty(self):
+    def test_tower_source_ssl_verify_empty(self, mocker):
         tower = CredentialType.defaults['tower']()
         self.instance.source = 'tower'
         self.instance.instance_filters = '12345'
@@ -2240,6 +2253,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             cred.inputs['password'] = encrypt_field(cred, 'password')
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         def run_pexpect_side_effect(*args, **kwargs):
             args, cwd, env, stdout = args
@@ -2249,7 +2263,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
         self.run_pexpect.side_effect = run_pexpect_side_effect
         self.task.run(self.pk)
 
-    def test_awx_task_env(self):
+    def test_awx_task_env(self, mocker):
         gce = CredentialType.defaults['gce']()
         self.instance.source = 'gce'
 
@@ -2264,6 +2278,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
             )
             return cred
         self.instance.get_cloud_credential = get_cred
+        self.instance.get_extra_credentials = mocker.Mock(return_value=[])
 
         with mock.patch('awx.main.tasks.settings.AWX_TASK_ENV', {'FOO': 'BAR'}):
             self.task.run(self.pk)

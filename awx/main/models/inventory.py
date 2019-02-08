@@ -1341,7 +1341,7 @@ class InventorySourceOptions(BaseModel):
         primary_cred = self.get_cloud_credential()
         extra_creds = []
         for cred in self.credentials.all():
-            if primary_cred and cred.pk != primary_cred.pk:
+            if primary_cred is None or cred.pk != primary_cred.pk:
                 extra_creds.append(cred)
         return extra_creds
 
@@ -1555,7 +1555,8 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, RelatedJobsMix
             return True
         elif self.source == 'gce':
             # These updates will hang if correct credential is not supplied
-            return bool(self.get_cloud_credential().kind == 'gce')
+            credential = self.get_cloud_credential()
+            return bool(credential and credential.kind == 'gce')
         return True
 
     def create_inventory_update(self, **kwargs):
@@ -1820,11 +1821,14 @@ class CustomInventoryScript(CommonModelNameNotUnique, ResourceMixin):
         return reverse('api:inventory_script_detail', kwargs={'pk': self.pk}, request=request)
 
 
-# TODO: move these to their own file somewhere?
+# TODO: move to awx/main/models/inventory/injectors.py
 class PluginFileInjector(object):
     plugin_name = None  # Ansible core name used to reference plugin
     initial_version = None  # at what version do we switch to the plugin
     ini_env_reference = None  # env var name that points to old ini config file
+    # base injector should be one of None, "managed", or "template"
+    # this dictates which logic to borrow from playbook injectors
+    base_injector = None
 
     def __init__(self, ansible_version):
         # This is InventoryOptions instance, could be source or inventory update
@@ -1843,14 +1847,6 @@ class PluginFileInjector(object):
             Version(self.ansible_version) >= Version(self.initial_version)
         )
 
-    @staticmethod
-    def get_builtin_injector(source):
-        from awx.main.models.credential import injectors as builtin_injectors
-        cred_kind = source.replace('ec2', 'aws')
-        if cred_kind not in dir(builtin_injectors):
-            return None
-        return getattr(builtin_injectors, cred_kind)
-
     def build_env(self, inventory_update, env, private_data_dir, private_data_files):
         if self.should_use_plugin():
             injector_env = self.get_plugin_env(inventory_update, private_data_dir, private_data_files)
@@ -1865,12 +1861,27 @@ class PluginFileInjector(object):
         """
         injected_env = {}
         credential = inventory_update.get_cloud_credential()
-        builtin_injector = self.get_builtin_injector(inventory_update.source)
-        if builtin_injector is not None:
-            builtin_injector(credential, injected_env, private_data_dir)
+        # some sources may have no credential, specifically ec2
+        if credential is None:
+            return injected_env
+        if self.base_injector == 'managed':
+            from awx.main.models.credential import injectors as builtin_injectors
+            cred_kind = inventory_update.source.replace('ec2', 'aws')
+            if cred_kind in dir(builtin_injectors):
+                getattr(builtin_injectors, cred_kind)(credential, injected_env, private_data_dir)
+                if safe:
+                    from awx.main.models.credential import build_safe_env
+                    return build_safe_env(injected_env)
+        elif self.base_injector == 'template':
+            injected_env['INVENTORY_UPDATE_ID'] = str(inventory_update.pk)  # so injector knows this is inventory
+            safe_env = injected_env.copy()
+            args = []
+            safe_args = []
+            credential.credential_type.inject_credential(
+                credential, injected_env, safe_env, args, safe_args, private_data_dir
+            )
             if safe:
-                from awx.main.models.credential import build_safe_env
-                injected_env = build_safe_env(injected_env)
+                return safe_env
         return injected_env
 
     def get_plugin_env(self, inventory_update, private_data_dir, private_data_files, safe=False):
@@ -1916,8 +1927,11 @@ class PluginFileInjector(object):
 
 class azure_rm(PluginFileInjector):
     plugin_name = 'azure_rm'
-    initial_version = '2.7'
+    # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51864
+    # TODO: put in correct version when Ansible core fixes are in
+    initial_version = '4.0'
     ini_env_reference = 'AZURE_INI_PATH'
+    base_injector = 'managed'
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
         ret = dict(
@@ -1967,8 +1981,13 @@ class azure_rm(PluginFileInjector):
 
 class ec2(PluginFileInjector):
     plugin_name = 'aws_ec2'
-    initial_version = '2.6'  # 2.5 has bugs forming keyed groups
+    # 2.5 has bugs forming keyed groups
+    # 2.8 does not allow parent groups or group names like us-east-2
+    # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/52358
+    # TODO: put in correct version when Ansible core fixes are in
+    initial_version = '4.0'
     ini_env_reference = 'EC2_INI_PATH'
+    base_injector = 'managed'
 
     def _compat_compose_vars(self):
         # https://gist.github.com/s-hertel/089c613914c051f443b53ece6995cc77
@@ -1990,6 +2009,7 @@ class ec2(PluginFileInjector):
             'ec2_reason': 'state_transition_reason',
             'ec2_security_group_ids': "security_groups | map(attribute='group_id') | list |  join(',')",
             'ec2_security_group_names': "security_groups | map(attribute='group_name') | list |  join(',')",
+            'ec2_tag_Name': 'tags.Name',
             'ec2_state': 'state.name',
             'ec2_state_code': 'state.code',
             'ec2_state_reason': 'state_reason.message if state_reason is defined else ""',
@@ -2133,7 +2153,10 @@ class ec2(PluginFileInjector):
 
 class gce(PluginFileInjector):
     plugin_name = 'gcp_compute'
-    initial_version = '2.6'
+    # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51884
+    # TODO: put in correct version when Ansible core fixes are in
+    initial_version = '4.0'
+    base_injector = 'managed'
 
     def get_script_env(self, inventory_update, private_data_dir, private_data_files):
         env = super(gce, self).get_script_env(inventory_update, private_data_dir, private_data_files)
@@ -2169,12 +2192,12 @@ class gce(PluginFileInjector):
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
         credential = inventory_update.get_cloud_credential()
-        builtin_injector = self.get_builtin_injector(inventory_update.source)
+
+        from awx.main.models.credential.injectors import gce as builtin_injector
         creds_path = builtin_injector(credential, {}, private_data_dir)
 
-        # gce never processed ther group_by options, if it had, we would selectively
-        # apply those options here, but it didn't, so they are added here
-        # and we may all hope that one day they can die, and rest in peace
+        # gce never processed the group_by field, if it had, we would selectively
+        # apply those options here, but it did not, so all groups are added here
         keyed_groups = [
             # the jinja2 syntax is duplicated with compose
             # https://github.com/ansible/ansible/issues/51883
@@ -2208,11 +2231,13 @@ class gce(PluginFileInjector):
 
     def get_plugin_env(self, inventory_update, private_data_dir, private_data_files, safe=False):
         # gce wants everything defined in inventory & cred files
+        # this explicitly turns off injection of environment variables
         return {}
 
 
 class vmware(PluginFileInjector):
     ini_env_reference = 'VMWARE_INI_PATH'
+    base_injector = 'managed'
 
     def build_script_private_data(self, inventory_update, private_data_dir):
         cp = configparser.RawConfigParser()
@@ -2242,7 +2267,7 @@ class vmware(PluginFileInjector):
 class openstack(PluginFileInjector):
     ini_env_reference = 'OS_CLIENT_CONFIG_FILE'
     plugin_name = 'openstack'
-    initial_version = '2.5'
+    initial_version = '2.7.8'  # https://github.com/ansible/ansible/pull/52369
 
     def _get_clouds_dict(self, inventory_update, credential, private_data_dir, mk_cache=True):
         openstack_auth = dict(auth_url=credential.get_input('host', default=''),
@@ -2347,23 +2372,14 @@ class openstack(PluginFileInjector):
 
 
 class rhv(PluginFileInjector):
-
-    def get_script_env(self, inventory_update, private_data_dir, private_data_files):
-        """Unlike the others, ovirt uses the custom credential templating
-        """
-        env = {'INVENTORY_UPDATE_ID': inventory_update.pk}
-        safe_env = env.copy()
-        args = []
-        safe_args = []
-        credential = inventory_update.get_cloud_credential()
-        credential.credential_type.inject_credential(
-            credential, env, safe_env, args, safe_args, private_data_dir
-        )
-        return env
+    """ovirt uses the custom credential templating, and that is all
+    """
+    base_injector = 'template'
 
 
 class satellite6(PluginFileInjector):
     ini_env_reference = 'FOREMAN_INI_PATH'
+    # No base injector, because this apparently does not work in playbooks
 
     def build_script_private_data(self, inventory_update, private_data_dir):
         cp = configparser.RawConfigParser()
@@ -2409,6 +2425,7 @@ class satellite6(PluginFileInjector):
 
 class cloudforms(PluginFileInjector):
     ini_env_reference = 'CLOUDFORMS_INI_PATH'
+    # Also no base_injector because this does not work in playbooks
 
     def build_script_private_data(self, inventory_update, private_data_dir):
         cp = configparser.RawConfigParser()
@@ -2441,6 +2458,7 @@ class cloudforms(PluginFileInjector):
 
 
 class tower(PluginFileInjector):
+    base_injector = 'template'
 
     def get_script_env(self, inventory_update, private_data_dir, private_data_files):
         env = super(tower, self).get_script_env(inventory_update, private_data_dir, private_data_files)

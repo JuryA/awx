@@ -13,6 +13,7 @@ from awx.main.models import (
     InventoryUpdate,
     Job
 )
+from awx.main.models.inventory import PluginFileInjector
 from awx.main.utils.filters import SmartFilter
 
 
@@ -204,6 +205,27 @@ class TestSCMClean:
 
         with pytest.raises(ValidationError):
             inv_src2.clean_update_on_project_update()
+
+
+@pytest.mark.django_db
+class TestInventorySourceInjectors:
+    def test_should_use_plugin(self):
+        class foo(PluginFileInjector):
+            initial_version = '2.7.8'
+        assert not foo('2.7.7').should_use_plugin()
+        assert foo('2.8').should_use_plugin()
+
+    def test_extra_credentials(self, project, credential):
+        inventory_source = InventorySource.objects.create(
+            name='foo', source='custom', source_project=project
+        )
+        inventory_source.credentials.add(credential)
+        assert inventory_source.get_cloud_credential() == None
+        assert inventory_source.get_extra_credentials() == [credential]
+
+        inventory_source.source = 'ec2'
+        assert inventory_source.get_cloud_credential() == credential
+        assert inventory_source.get_extra_credentials() == []
 
 
 @pytest.fixture

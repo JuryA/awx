@@ -49,7 +49,7 @@ from awx.main.models import (
     UnifiedJob, Notification,
     Inventory, SmartInventoryMembership,
     Job, AdHocCommand, ProjectUpdate, InventoryUpdate, SystemJob,
-    Project,
+    Project, InventorySource,
     JobEvent, ProjectUpdateEvent, InventoryUpdateEvent, AdHocCommandEvent, SystemJobEvent,
     build_safe_env
 )
@@ -59,10 +59,11 @@ from awx.main.queue import CallbackQueueDispatcher
 from awx.main.expect import run, isolated_manager
 from awx.main.dispatch.publish import task
 from awx.main.dispatch import get_local_queuename, reaper
-from awx.main.utils import (get_ansible_version, get_ssh_version, update_scm_url,
+from awx.main.utils import (get_ssh_version, update_scm_url,
                             check_proot_installed, build_proot_temp_dir, get_licenser,
                             wrap_args_with_proot, OutputEventFilter, OutputVerboseFilter, ignore_inventory_computed_fields,
                             ignore_inventory_group_removal, extract_ansible_vars, schedule_task_manager)
+from awx.main.utils.common import _get_ansible_version
 from awx.main.utils.safe_yaml import safe_dump, sanitize_jinja
 from awx.main.utils.reload import stop_local_services
 from awx.main.utils.pglock import advisory_lock
@@ -980,7 +981,7 @@ class BaseTask(object):
                 self.update_model(pk, custom_virtualenv=getattr(instance, 'ansible_virtualenv_path', settings.ANSIBLE_VENV_PATH))
 
             # Fetch ansible version once here to support version-dependent features.
-            kwargs['ansible_version'] = get_ansible_version(
+            kwargs['ansible_version'] = _get_ansible_version(
                 ansible_path=self.get_path_to_ansible(instance, executable='ansible'))
             kwargs['private_data_dir'] = self.build_private_data_dir(instance, **kwargs)
 
@@ -1911,9 +1912,8 @@ class RunInventoryUpdate(BaseTask):
         if inventory_update.source in InventorySource.injectors:
             injector = InventorySource.injectors[inventory_update.source](kwargs['ansible_version'])
 
-        env = injector.build_env(inventory_update, env, kwargs['private_data_dir'], kwargs['private_data_files'])
-
         if injector is not None:
+            env = injector.build_env(inventory_update, env, kwargs['private_data_dir'], kwargs['private_data_files'])
             # All CLOUD_PROVIDERS sources implement as either script or auto plugin
             if injector.should_use_plugin():
                 env['ANSIBLE_INVENTORY_ENABLED'] = 'auto'
