@@ -11,3 +11,4 @@ clouds:
       project_name: fooo
       username: fooo
     private: false
+    verify: false

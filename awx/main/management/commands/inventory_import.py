@@ -308,12 +308,6 @@ class Command(BaseCommand):
             raise NotImplementedError('Value of enabled {} not understood.'.format(enabled))
 
     def get_source_absolute_path(self, source):
-        # Sanity check: We sanitize these module names for our API but Ansible proper doesn't follow
-        # good naming conventions
-        source = source.replace('rhv.py', 'ovirt4.py')
-        source = source.replace('satellite6.py', 'foreman.py')
-        source = source.replace('vmware.py', 'vmware_inventory.py')
-        source = source.replace('openstack.py', 'openstack_inventory.py')
         if not os.path.exists(source):
             raise IOError('Source does not exist: %s' % source)
         source = os.path.join(os.getcwd(), os.path.dirname(source),

@@ -1823,7 +1823,10 @@ class CustomInventoryScript(CommonModelNameNotUnique, ResourceMixin):
 
 # TODO: move to awx/main/models/inventory/injectors.py
 class PluginFileInjector(object):
+    # if plugin_name is not given, no inventory plugin functionality exists
     plugin_name = None  # Ansible core name used to reference plugin
+    # if initial_version is None, but we have pugin name, injection logic exists,
+    # but it is vaporware, meaning we do not use it for some reason in Ansible core
     initial_version = None  # at what version do we switch to the plugin
     ini_env_reference = None  # env var name that points to old ini config file
     # base injector should be one of None, "managed", or "template"
@@ -1836,14 +1839,35 @@ class PluginFileInjector(object):
 
     @property
     def filename(self):
+        """Inventory filename for using the inventory plugin
+        This is created dynamically, but the auto plugin requires this exact naming
+        """
         return '{0}.yml'.format(self.plugin_name)
 
+    @property
+    def script_name(self):
+        """Name of the script located in awx/plugins/inventory
+        """
+        return '{0}.py'.format(self.__class__.__name__)
+
+    def inventory_as_dict(self, inventory_update, private_data_dir):
+        """Default implementation of inventory plugin file contents.
+        There are some valid cases when all parameters can be obtained from
+        the environment variables, example "plugin: linode" is valid
+        ideally, however, some options should be filled from the inventory source data
+        """
+        if self.plugin_name is None:
+            raise NotImplementedError('At minimum the plugin name is needed for inventory plugin use.')
+        return {'plugin': self.plugin_name}
+
     def inventory_contents(self, inventory_update, private_data_dir):
+        """Returns a string that is the content for the inventory file for the inventory plugin
+        """
         return yaml.safe_dump(self.inventory_as_dict(inventory_update, private_data_dir), default_flow_style=False)
 
     def should_use_plugin(self):
         return bool(
-            self.initial_version and
+            self.plugin_name and self.initial_version and
             Version(self.ansible_version) >= Version(self.initial_version)
         )
 
@@ -1927,9 +1951,10 @@ class PluginFileInjector(object):
 
 class azure_rm(PluginFileInjector):
     plugin_name = 'azure_rm'
+    # FIXME: put in correct version when Ansible core fixes are in
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51864
-    # TODO: put in correct version when Ansible core fixes are in
-    initial_version = '4.0'
+    # also affected by unsafe group names issue
+    # initial_version = '2.8'
     ini_env_reference = 'AZURE_INI_PATH'
     base_injector = 'managed'
 
@@ -1981,16 +2006,21 @@ class azure_rm(PluginFileInjector):
 
 class ec2(PluginFileInjector):
     plugin_name = 'aws_ec2'
+    # FIXME: put in correct version when Ansible core fixes are in
     # 2.5 has bugs forming keyed groups
-    # 2.8 does not allow parent groups or group names like us-east-2
+    # 2.8 does not allow parent groups or group names like us-east-2 (unsafe group names issue)
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/52358
-    # TODO: put in correct version when Ansible core fixes are in
-    initial_version = '4.0'
+    # initial_version = '2.8'
     ini_env_reference = 'EC2_INI_PATH'
     base_injector = 'managed'
 
+    def get_plugin_env(self, *args, **kwargs):
+        ret = super(ec2, self).get_plugin_env(*args, **kwargs)
+        # We need native jinja2 types so that ec2_state_code will give integer
+        ret['ANSIBLE_JINJA2_NATIVE'] = str(True)
+        return ret
+
     def _compat_compose_vars(self):
-        # https://gist.github.com/s-hertel/089c613914c051f443b53ece6995cc77
         return {
             # vars that change
             'ec2_block_devices': (
@@ -2024,6 +2054,8 @@ class ec2(PluginFileInjector):
             'ec2_image_id': 'image_id',
             'ec2_instance_type': 'instance_type',
             'ec2_key_name': 'key_name',
+            # ec2_launch_time: 'launch_time | regex_replace(" ", "T") | regex_replace("(\+)(\d\d):(\d)(\d)$", ".\g<2>\g<3>Z")'
+            # ^ timestamp format compatibility, we could, but should we??
             'ec2_launch_time': 'launch_time',
             'ec2_platform': 'platform | default("")',
             'ec2_private_dns_name': 'private_dns_name',
@@ -2153,9 +2185,10 @@ class ec2(PluginFileInjector):
 
 class gce(PluginFileInjector):
     plugin_name = 'gcp_compute'
+    # FIXME: put in correct version when Ansible core fixes are in
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51884
-    # TODO: put in correct version when Ansible core fixes are in
-    initial_version = '4.0'
+    # also affected by unsafe group names issue
+    # initial_version = '2.8'
     base_injector = 'managed'
 
     def get_script_env(self, inventory_update, private_data_dir, private_data_files):
@@ -2236,6 +2269,7 @@ class gce(PluginFileInjector):
 
 
 class vmware(PluginFileInjector):
+    # plugin_name = 'vmware_vm_inventory'  # FIXME: implement me
     ini_env_reference = 'VMWARE_INI_PATH'
     base_injector = 'managed'
 
@@ -2268,6 +2302,10 @@ class openstack(PluginFileInjector):
     ini_env_reference = 'OS_CLIENT_CONFIG_FILE'
     plugin_name = 'openstack'
     initial_version = '2.7.8'  # https://github.com/ansible/ansible/pull/52369
+
+    @property
+    def script_name(self):
+        return 'openstack_inventory.py'  # exception
 
     def _get_clouds_dict(self, inventory_update, credential, private_data_dir, mk_cache=True):
         openstack_auth = dict(auth_url=credential.get_input('host', default=''),
@@ -2374,12 +2412,23 @@ class openstack(PluginFileInjector):
 class rhv(PluginFileInjector):
     """ovirt uses the custom credential templating, and that is all
     """
+    # plugin_name = 'FIXME'  # contribute inventory plugin to Ansible
     base_injector = 'template'
+
+    @property
+    def script_name(self):
+        return 'ovirt4.py'  # exception
 
 
 class satellite6(PluginFileInjector):
+    plugin_name = 'foreman'
     ini_env_reference = 'FOREMAN_INI_PATH'
-    # No base injector, because this apparently does not work in playbooks
+    # initial_version = '2.8'  # FIXME: turn on after plugin is validated
+    # No base injector, because this does not work in playbooks. Bug??
+
+    @property
+    def script_name(self):
+        return 'foreman.py'  # exception
 
     def build_script_private_data(self, inventory_update, private_data_dir):
         cp = configparser.RawConfigParser()
@@ -2422,8 +2471,20 @@ class satellite6(PluginFileInjector):
 
         return self.dump_cp(cp, credential)
 
+    def get_plugin_env(self, inventory_update, private_data_dir, private_data_files, safe=False):
+        # this assumes that this is merged
+        # https://github.com/ansible/ansible/pull/52693
+        credential = inventory_update.get_cloud_credential()
+        ret = {}
+        if credential:
+            ret['FOREMAN_SERVER'] = credential.get_input('host', default='')
+            ret['FOREMAN_USER'] = credential.get_input('username', default='')
+            ret['FOREMAN_PASSWORD'] = credential.get_input('password', default='')
+        return ret
+
 
 class cloudforms(PluginFileInjector):
+    # plugin_name = 'FIXME'  # contribute inventory plugin to Ansible
     ini_env_reference = 'CLOUDFORMS_INI_PATH'
     # Also no base_injector because this does not work in playbooks
 
@@ -2458,6 +2519,7 @@ class cloudforms(PluginFileInjector):
 
 
 class tower(PluginFileInjector):
+    plugin_name = 'tower'  # FIXME: fix license issue and implement me
     base_injector = 'template'
 
     def get_script_env(self, inventory_update, private_data_dir, private_data_files):
@@ -2465,6 +2527,13 @@ class tower(PluginFileInjector):
         env['TOWER_INVENTORY'] = inventory_update.instance_filters
         env['TOWER_LICENSE_TYPE'] = get_licenser().validate().get('license_type', 'unlicensed')
         return env
+
+    def inventory_as_dict(self, inventory_update, private_data_dir):
+        # Credentials injected as env vars, same as script
+        return {
+            'plugin': self.plugin_name,
+            'inventory_id': int(inventory_update.instance_filters)
+        }
 
 
 for cls in PluginFileInjector.__subclasses__():

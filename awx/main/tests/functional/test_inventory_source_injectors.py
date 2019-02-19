@@ -6,8 +6,10 @@ import re
 
 from awx.main.tasks import RunInventoryUpdate
 from awx.main.models import InventorySource, Credential, CredentialType, UnifiedJob
-from awx.main.constants import CLOUD_PROVIDERS
+from awx.main.constants import CLOUD_PROVIDERS, STANDARD_INVENTORY_UPDATE_ENV
 from awx.main.tests import data
+
+from django.conf import settings
 
 DATA = os.path.join(os.path.dirname(data.__file__), 'inventory')
 
@@ -123,8 +125,11 @@ def read_content(private_data_dir, raw_env, inventory_update):
     # Filter out environment variables which come from runtime environment
     env = {}
     exclude_keys = set(('PATH', 'INVENTORY_SOURCE_ID', 'INVENTORY_UPDATE_ID'))
+    for key in dir(settings):
+        if key.startswith('ANSIBLE_'):
+            exclude_keys.add(key)
     for k, v in raw_env.items():
-        if k.startswith('ANSIBLE_') or k in exclude_keys:
+        if k in STANDARD_INVENTORY_UPDATE_ENV or k in exclude_keys:
             continue
         if k not in os.environ or v != os.environ[k]:
             env[k] = v
@@ -233,11 +238,8 @@ def test_inventory_update_injected_content(this_kind, script_or_plugin, inventor
     task = RunInventoryUpdate()
 
     use_plugin = bool(script_or_plugin == 'plugins')
-    if use_plugin:
-        if this_kind not in InventorySource.injectors:
-            pytest.skip('Injector class for this source is not written yet')
-        elif InventorySource.injectors[this_kind].initial_version is None:
-            pytest.skip('Use of inventory plugin is not enabled for this source')
+    if use_plugin and InventorySource.injectors[this_kind].plugin_name is None:
+        pytest.skip('Use of inventory plugin is not enabled for this source')
 
     def substitute_run(args, cwd, call_env, stdout_handle, **_kw):
         """This method will replace run_pexpect
@@ -246,6 +248,8 @@ def test_inventory_update_injected_content(this_kind, script_or_plugin, inventor
         If MAKE_INVENTORY_REFERENCE_FILES is set, it will produce reference files
         """
         private_data_dir = call_env.pop('AWX_PRIVATE_DATA_DIR')
+        plugin_setting = call_env.pop('ANSIBLE_INVENTORY_ENABLED')
+        assert plugin_setting == 'auto' if use_plugin else 'script'
         set_files = bool(os.getenv("MAKE_INVENTORY_REFERENCE_FILES", 'false').lower()[0] not in ['f', '0'])
         env, content = read_content(private_data_dir, call_env, inventory_update)
         base_dir = os.path.join(DATA, script_or_plugin)
@@ -259,7 +263,7 @@ def test_inventory_update_injected_content(this_kind, script_or_plugin, inventor
             if not os.path.exists(source_dir):
                 raise FileNotFoundError(
                     'Maybe you never made reference files? '
-                    'MAKE_INVENTORY_REFERENCE_FILES=true py.test ...\noriginal: {}'.format(e))
+                    'MAKE_INVENTORY_REFERENCE_FILES=true py.test ...\noriginal: {}')
             files_dir = os.path.join(source_dir, 'files')
             try:
                 expected_file_list = os.listdir(files_dir)
