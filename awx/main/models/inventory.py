@@ -2273,6 +2273,10 @@ class vmware(PluginFileInjector):
     ini_env_reference = 'VMWARE_INI_PATH'
     base_injector = 'managed'
 
+    @property
+    def script_name(self):
+        return 'vmware_inventory.py'  # exception
+
     def build_script_private_data(self, inventory_update, private_data_dir):
         cp = configparser.RawConfigParser()
         credential = inventory_update.get_cloud_credential()
