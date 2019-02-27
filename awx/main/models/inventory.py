@@ -1954,7 +1954,7 @@ class azure_rm(PluginFileInjector):
     # FIXME: put in correct version when Ansible core fixes are in
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51864
     # also affected by unsafe group names issue
-    # initial_version = '2.8'
+    initial_version = '2.8'
     ini_env_reference = 'AZURE_INI_PATH'
     base_injector = 'managed'
 
@@ -2010,7 +2010,7 @@ class ec2(PluginFileInjector):
     # 2.5 has bugs forming keyed groups
     # 2.8 does not allow parent groups or group names like us-east-2 (unsafe group names issue)
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/52358
-    # initial_version = '2.8'
+    initial_version = '2.8'
     ini_env_reference = 'EC2_INI_PATH'
     base_injector = 'managed'
 
@@ -2188,7 +2188,7 @@ class gce(PluginFileInjector):
     # FIXME: put in correct version when Ansible core fixes are in
     # 2.8 does not have all needed hostvars https://github.com/ansible/ansible/issues/51884
     # also affected by unsafe group names issue
-    # initial_version = '2.8'
+    initial_version = '2.8'
     base_injector = 'managed'
 
     def get_script_env(self, inventory_update, private_data_dir, private_data_files):
@@ -2305,7 +2305,9 @@ class vmware(PluginFileInjector):
 class openstack(PluginFileInjector):
     ini_env_reference = 'OS_CLIENT_CONFIG_FILE'
     plugin_name = 'openstack'
-    initial_version = '2.7.8'  # https://github.com/ansible/ansible/pull/52369
+    # 2.7.8 limit: https://github.com/ansible/ansible/pull/52369
+    # however, the unsafe group names issue still applies, limiting to 2.8
+    initial_version = '2.8'
 
     @property
     def script_name(self):
