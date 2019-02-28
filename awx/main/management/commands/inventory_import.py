@@ -880,12 +880,24 @@ class Command(BaseCommand):
         self._create_update_group_children()
         self._create_update_group_hosts()
 
+    def remote_tower_license_compare(self, local_license_type):
+        # this requires https://github.com/ansible/ansible/pull/52747
+        source_vars = self.all_group.variables
+        remote_license_type = source_vars.get('tower_metadata', {}).get('license_type', None)
+        if remote_license_type is None:
+            raise CommandError('Unexpected Error: Tower inventory plugin missing needed metadata!')
+        if local_license_type != remote_license_type:
+            raise CommandError('Tower server licenses must match: source: {} local: {}'.format(
+                remote_license_type, local_license_type
+            ))
+
     def check_license(self):
         license_info = get_licenser().validate()
+        local_license_type = license_info.get('license_type', 'UNLICENSED')
         if license_info.get('license_key', 'UNLICENSED') == 'UNLICENSED':
             logger.error(LICENSE_NON_EXISTANT_MESSAGE)
             raise CommandError('No license found!')
-        elif license_info.get('license_type', 'UNLICENSED') == 'open':
+        elif local_license_type == 'open':
             return
         available_instances = license_info.get('available_instances', 0)
         free_instances = license_info.get('free_instances', 0)
@@ -894,6 +906,10 @@ class Command(BaseCommand):
         if time_remaining <= 0 and not license_info.get('demo', False):
             logger.error(LICENSE_EXPIRED_MESSAGE)
             raise CommandError("License has expired!")
+        # special check for tower-type inventory sources
+        # but only if running the plugin
+        if self.inventory_source.source == 'tower' and ('tower.yml' in self.source or 'tower.yaml' in self.source):
+            self.remote_tower_license_compare(local_license_type)
         if free_instances < 0:
             d = {
                 'new_count': new_count,

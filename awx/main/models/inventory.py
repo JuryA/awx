@@ -2538,7 +2538,8 @@ class tower(PluginFileInjector):
         # Credentials injected as env vars, same as script
         return {
             'plugin': self.plugin_name,
-            'inventory_id': int(inventory_update.instance_filters)
+            'inventory_id': int(inventory_update.instance_filters),
+            'include_metadata': True  # used for license check
         }
 
 
