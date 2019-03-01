@@ -246,7 +246,6 @@ class TestInventorySourceInjectors:
         are named correctly, because Ansible will reject files that do
         not have these exact names
         """
-        print(InventorySource.injectors)
         injector = InventorySource.injectors[source]('2.7.7')
         assert injector.filename == filename
 
@@ -259,9 +258,24 @@ class TestInventorySourceInjectors:
     def test_script_filenames(self, source, script_name):
         """Ansible has several exceptions in naming of scripts
         """
-        print(InventorySource.injectors)
         injector = InventorySource.injectors[source]('2.7.7')
         assert injector.script_name == script_name
+
+    def test_compatibility_mode_azure(self):
+        injector = InventorySource.injectors['azure_rm']('2.9')
+        inv_src = InventorySource(
+            name='azure source', source='azure_rm',
+            compatibility_mode=True,
+            group_by='powerstate'
+        )
+        compat_on = injector.inventory_as_dict(inv_src, '/tmp/foo')
+        # suspicious, yes, that is just what the script did
+        assert len(compat_on['keyed_groups']) == 3
+        inv_src.compatibility_mode = False
+        compat_off = injector.inventory_as_dict(inv_src, '/tmp/foo')
+        # much better, everyone should turn off the flag and live in the future
+        assert len(compat_off['keyed_groups']) == 1
+        assert 'powerstate' in compat_off['keyed_groups'][0].get('key')
 
 
 @pytest.fixture

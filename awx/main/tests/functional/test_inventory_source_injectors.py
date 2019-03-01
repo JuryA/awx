@@ -231,6 +231,7 @@ def test_inventory_update_injected_content(this_kind, script_or_plugin, inventor
         inventory=inventory,
         source=this_kind,
         source_vars=src_vars,
+        compatibility_mode=True,
         **extra_kwargs
     )
     inventory_source.credentials.add(fake_credential_factory(this_kind))
@@ -275,14 +276,14 @@ def test_inventory_update_injected_content(this_kind, script_or_plugin, inventor
             for f_name in expected_file_list:
                 with open(os.path.join(files_dir, f_name), 'r') as f:
                     ref_content = f.read()
-                    assert content[f_name] == ref_content
+                    assert ref_content == content[f_name]
             try:
                 with open(os.path.join(source_dir, 'env.json'), 'r') as f:
                     ref_env_text = f.read()
                     ref_env = json.loads(ref_env_text)
             except FileNotFoundError:
                 ref_env = {}
-            assert env == ref_env
+            assert ref_env == env
         return ('successful', 0)
 
     # Mock this so that it will not send events to the callback receiver

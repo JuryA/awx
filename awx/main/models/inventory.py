@@ -1964,28 +1964,43 @@ class azure_rm(PluginFileInjector):
     base_injector = 'managed'
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
-        ret = dict(
-            plugin=self.plugin_name,
+        ret = super(azure_rm, self).inventory_as_dict(inventory_update, private_data_dir)
+
+        if inventory_update.compatibility_mode:
             # By default the script did not filter hosts
-            default_host_filters=[],
-            # Groups that the script returned
-            keyed_groups=[
+            ret['default_host_filters'] = []
+            # Groups that the script returned, group_by field was never implemented
+            ret['keyed_groups'] = [
                 {'prefix': '', 'separator': '', 'key': 'location'},
                 {'prefix': '', 'separator': '', 'key': 'powerstate'},
                 {'prefix': '', 'separator': '', 'key': 'name'}
-            ],
-            hostvar_expressions={
+            ]
+            # Compatibility hostvars
+            ret['hostvar_expressions'] = {
                 'provisioning_state': 'provisioning_state | title',
                 'computer_name': 'name',
                 'type': 'resource_type',
                 'private_ip': 'private_ipv4_addresses | json_query("[0]")'
             }
-        )
+        elif inventory_update.group_by:
+            # Group by whatever user gave us, give standard plugin behavior
+            ret['keyed_groups'] = [{'key': x.strip()} for x in inventory_update.group_by.split(',') if x.strip()]
+        elif inventory_update.instance_filters:
+            ret.setdefault('exclude_host_filters', [])
+            for filter in inventory_update.instance_filters.split(','):
+                if not filter:
+                    continue
+                ret['exclude_host_filters'].append(filter)
 
-        # TODO: all regions currently failing due to:
-        # https://github.com/ansible/ansible/pull/48079
         if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-            ret['regions'] = inventory_update.source_regions.split(',')
+            # initialize a list for this section in inventory file
+            ret.setdefault('exclude_host_filters', [])
+            # make a python list of the regions we will use
+            python_regions = [x.strip() for x in inventory_update.source_regions.split(',')]
+            # convert that list in memory to python syntax in a string
+            # now put that in jinja2 syntax operating on hostvar key "location"
+            # and put that as an entry in the exclusions list
+            ret['exclude_host_filters'].append("location not in {}".format(repr(python_regions)))
         return ret
 
     def build_script_private_data(self, inventory_update, private_data_dir):
@@ -2076,6 +2091,8 @@ class ec2(PluginFileInjector):
         }
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
+        ret = super(ec2, self).inventory_as_dict(inventory_update, private_data_dir)
+
         keyed_groups = []
         group_by_hostvar = {
             'ami_id': {'prefix': '', 'separator': '', 'key': 'image_id'},
@@ -2104,22 +2121,33 @@ class ec2(PluginFileInjector):
                 # If a keyed group syntax does not exist, there is nothing we can do to get this group
                 if this_keyed_group is not None:
                     keyed_groups.append(this_keyed_group)
+        if keyed_groups:
+            ret['keyed_groups'] = keyed_groups
 
         # Instance ID not part of compat vars, because of settings.EC2_INSTANCE_ID_VAR
         # remove this variable at your own peril, there be dragons
         compose_dict = {'ec2_id': 'instance_id'}
-        # TODO: add an ability to turn this off
-        compose_dict.update(self._compat_compose_vars())
+        inst_filters = {}
 
-        inst_filters = {
-            # The script returned all states by default, the plugin does not
+        if inventory_update.compatibility_mode:
+            # TODO: add an ability to turn this off
+            compose_dict.update(self._compat_compose_vars())
+            # plugin provides "aws_ec2", but not this which the script gave
+            ret['groups'] = {'ec2': True}
+            # public_ip as hostname is non-default plugin behavior, script behavior
+            ret['hostnames'] = [
+                'network-interface.addresses.association.public-ip',
+                'dns-name',
+                'private-dns-name'
+            ]
+            # The script returned only running state by default, the plugin does not
             # https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html#options
             # options: pending | running | shutting-down | terminated | stopping | stopped
-            'instance-state-name': [
-                'running'
-                # 'pending', 'running', 'shutting-down', 'terminated', 'stopping', 'stopped'
-            ]
-        }
+            inst_filters['instance-state-name'] = ['running']
+
+        if compose_dict:
+            ret['compose'] = compose_dict
+
         if inventory_update.instance_filters:
             # logic used to live in ec2.py, now it belongs to us. Yay more code?
             filter_sets = [f for f in inventory_update.instance_filters.split(',') if f]
@@ -2134,22 +2162,12 @@ class ec2(PluginFileInjector):
                     continue
                 inst_filters[filter_key] = filter_value
 
-        ret = dict(
-            plugin=self.plugin_name,
-            hostnames=[
-                'network-interface.addresses.association.public-ip',  # non-default
-                'dns-name',
-                'private-dns-name'
-            ],
-            keyed_groups=keyed_groups,
-            groups={'ec2': True},  # plugin provides "aws_ec2", but not this
-            compose=compose_dict,
-            filters=inst_filters
-        )
-        # TODO: all regions currently failing due to:
-        # https://github.com/ansible/ansible/pull/48079
+        if inst_filters:
+            ret['filters'] = inst_filters
+
         if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
             ret['regions'] = inventory_update.source_regions.split(',')
+
         return ret
 
     def build_script_private_data(self, inventory_update, private_data_dir):
@@ -2215,7 +2233,6 @@ class gce(PluginFileInjector):
         # missing: gce_image, gce_uuid
         # https://github.com/ansible/ansible/issues/51884
         return {
-            'gce_id': 'id',
             'gce_description': 'description | default(None)',
             'gce_machine_type': 'machineType',
             'gce_name': 'name',
@@ -2225,44 +2242,59 @@ class gce(PluginFileInjector):
             'gce_status': 'status',
             'gce_subnetwork': 'networkInterfaces | json_query("[0].subnetwork.name")',
             'gce_tags': 'tags | json_query("items")',
-            'gce_zone': 'zone'
+            'gce_zone': 'zone',
+            # We need this as long as hostnames is non-default, otherwise hosts
+            # will not be addressed correctly, was returned in script
+            'ansible_ssh_host': 'networkInterfaces | json_query("[0].accessConfigs[0].natIP")'
         }
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
+        ret = super(gce, self).inventory_as_dict(inventory_update, private_data_dir)
         credential = inventory_update.get_cloud_credential()
 
+        # auth related items
         from awx.main.models.credential.injectors import gce as builtin_injector
-        creds_path = builtin_injector(credential, {}, private_data_dir)
+        ret['service_account_file'] = builtin_injector(credential, {}, private_data_dir)
+        ret['projects'] = [credential.get_input('project', default='')]
+        ret['auth_kind'] = "serviceaccount"
 
-        # gce never processed the group_by field, if it had, we would selectively
-        # apply those options here, but it did not, so all groups are added here
-        keyed_groups = [
-            # the jinja2 syntax is duplicated with compose
-            # https://github.com/ansible/ansible/issues/51883
-            {'prefix': '', 'separator': '', 'key': 'networkInterfaces | json_query("[0].networkIP")'},  # gce_private_ip
-            {'prefix': '', 'separator': '', 'key': 'networkInterfaces | json_query("[0].accessConfigs[0].natIP")'},  # gce_public_ip
-            {'prefix': '', 'separator': '', 'key': 'machineType'},
-            {'prefix': '', 'separator': '', 'key': 'zone'},
-            {'prefix': 'tag', 'key': 'tags | json_query("items")'},  # gce_tags
-            {'prefix': 'status', 'key': 'status | lower'}
-        ]
+        filters = []
+        keyed_groups = []
+        # This will be used as the gce instance_id, must be universal, non-compat
+        compose_dict = {'gce_id': 'id'}
 
-        # We need this as long as hostnames is non-default, otherwise hosts
-        # will not be addressed correctly, so not considered a "compat" change
-        compose_dict = {'ansible_ssh_host': 'networkInterfaces | json_query("[0].accessConfigs[0].natIP")'}
-        # These are only those necessary to emulate old hostvars
-        compose_dict.update(self._compat_compose_vars())
+        if inventory_update.compatibility_mode:
+            # gce never processed the group_by field, if it had, we would selectively
+            # apply those options here, but it did not, so all groups are added here
+            keyed_groups = [
+                # the jinja2 syntax is duplicated with compose
+                # https://github.com/ansible/ansible/issues/51883
+                {'prefix': '', 'separator': '', 'key': 'networkInterfaces | json_query("[0].networkIP")'},  # gce_private_ip
+                {'prefix': '', 'separator': '', 'key': 'networkInterfaces | json_query("[0].accessConfigs[0].natIP")'},  # gce_public_ip
+                {'prefix': '', 'separator': '', 'key': 'machineType'},
+                {'prefix': '', 'separator': '', 'key': 'zone'},
+                {'prefix': 'tag', 'key': 'tags | json_query("items")'},  # gce_tags
+                {'prefix': 'status', 'key': 'status | lower'}
+            ]
+            # Add in old hostvars aliases
+            compose_dict.update(self._compat_compose_vars())
+            # Non-default names to match script
+            ret['hostnames'] = ['name', 'public_ip', 'private_ip']
+        elif inventory_update.group_by:
+            # Group by whatever user gave us, give standard plugin behavior
+            keyed_groups = [{'key': x.strip()} for x in inventory_update.group_by.split(',') if x.strip()]
+        elif inventory_update.instance_filters:
+            for filter in inventory_update.instance_filters.split(','):
+                if not filter:
+                    continue
+                filters.append(filter)
 
-        ret = dict(
-            plugin=self.plugin_name,
-            projects=[credential.get_input('project', default='')],
-            filters=None,  # necessary cruft, see: https://github.com/ansible/ansible/pull/50025
-            service_account_file=creds_path,
-            auth_kind="serviceaccount",
-            hostnames=['name', 'public_ip', 'private_ip'],  # need names to match with script
-            keyed_groups=keyed_groups,
-            compose=compose_dict,
-        )
+        if keyed_groups:
+            ret['keyed_groups'] = keyed_groups
+        if filters:
+            ret['filters'] = filters
+        if compose_dict:
+            ret['compose'] = compose_dict
         if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
             ret['zones'] = inventory_update.source_regions.split(',')
         return ret

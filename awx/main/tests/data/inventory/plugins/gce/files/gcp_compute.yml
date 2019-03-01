@@ -12,7 +12,6 @@ compose:
   gce_subnetwork: networkInterfaces | json_query("[0].subnetwork.name")
   gce_tags: tags | json_query("items")
   gce_zone: zone
-filters: null
 hostnames:
 - name
 - public_ip

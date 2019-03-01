@@ -1,4 +1,6 @@
 default_host_filters: []
+exclude_host_filters:
+- location not in ['southcentralus', 'westus']
 hostvar_expressions:
   computer_name: name
   private_ip: private_ipv4_addresses | json_query("[0]")
@@ -15,6 +17,3 @@ keyed_groups:
   prefix: ''
   separator: ''
 plugin: azure_rm
-regions:
-- southcentralus
-- westus

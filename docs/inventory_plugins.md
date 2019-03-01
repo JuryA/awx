@@ -2,9 +2,14 @@
 Inventory updates change from using scripts which are vendored as executable
 python scripts in the AWX folder `awx/plugins/inventory` (taken originally from
 Ansible folder `contrib/inventory`) to using dynamically-generated
-YAML files which conform to the specifications of the `auto` inventory plugin.
+YAML files which conform to the specifications of the `auto` inventory plugin
+which are then parsed by their respective inventory plugin.
 
-## Background for Transition
+The major organizational change is that the inventory plugins are
+part of the Ansible core distribution, whereas the same logic used to
+be a part of AWX source.
+
+## Prior Background for Transition
 
 AWX used to maintain logic that parsed `.ini` inventory file contents,
 in addition to interpreting the JSON output of scripts, re-calling with
@@ -14,7 +19,7 @@ the `--host` option in the case the `_meta.hostvars` key was not provided.
 
 The CLI entry point `ansible-inventory` was introduced in Ansible 2.4.
 In Tower 3.2, inventory imports began running this command
-as an intermediary between the scripts or user-provided inventory and
+as an intermediary between the inventory and
 the import's logic to save content to database. Using `ansible-inventory`
 eliminates the need to maintain source-specific logic,
 relying on Ansible's code instead. This also allows us to
@@ -50,10 +55,10 @@ To see what version the plugin transition will happen, see
 subclass of `PluginFileInjector`, and there should be an `initial_version`
 which is the first version that testing deemed to have sufficient parity
 in the content its inventory plugin returns. For example, `openstack` will
-begin using the inventory plugin in Ansible version 2.7.8, because the
+begin using the inventory plugin in Ansible version 2.8, because the
 openstack inventory plugin had an issue with sending logs to stdout which
 was fixed in that version. If you run an openstack inventory update in
-2.7.7 or lower, it will use the script.
+2.8 or lower, it will use the script.
 
 ### Sunsetting the scripts
 
@@ -68,15 +73,49 @@ For example, after AWX no longer supports Ansible 2.7, the script
 ## Changes to Expect in Imports
 
 An effort was made to keep imports working in the exact same way after
-the switchover to plugins was made as before. Some differences will
-still exist that users may need to be aware of.
+the switchover. However, the inventory plugins are a fundamental rewrite
+and many elements of default behavior has changed. Because of that,
+a `compatibility_mode` toggle was added.
 
-In many cases, the syntax of the inventory file is used to obtain old
-behavior which the inventory plugin does not do by default.
-Exact examples of inventory file syntax used in updates (with dummy data)
-can be found in `awx/main/tests/data/inventory/scripts`.
+In a data migration, all existing cloud sources are switched over to
+use `compatibility_mode`. New inventory sources will default to having
+this off.
 
-### hostvar keys
+We recommend that you opt out of compatibility mode because this is more
+future-proof, and also suggest that you set the `overwrite`
+flag to help assure stale content is removed.
+
+### Changes with Compatibility Mode Off
+
+If no `group_by` entries are given, then no constructed groups will be
+produced. That means no grouping by tags, regions, or similar attributes
+unless the user adds these to the `group_by` listing. This is different
+from prior behavior, where a blank `group_by` field would include all
+possible groups.
+
+The set of `hostvars` will be almost completely different, using new names
+for data which is mostly the same content. You can see the jinja2 keyed_groups
+construction used in compatibility mode to help get a sense of what
+new names replace old names.
+
+In many case, the host names will change. In many cases, accurate host
+tracking will still be maintained via the host `instance_id`, but this
+is not guaranteed.
+
+Group names will be sanitized. That means that characters such as "-" will
+be replaced by underscores "\_". In some cases, this means that a large
+fraction of groups get renamed as you move from scripts to plugins.
+Sanitizing group names allows referencing them in jinja2 in playbooks
+without errors.
+
+### Changes with Compatibility Mode On
+
+Programatically-generated examples of inventory file syntax used in
+updates (with dummy data) can be found in `awx/main/tests/data/inventory/scripts`,
+these demonstrate the inventory file syntax used to restore old behavior
+from the inventory scripts.
+
+#### hostvar keys
 
 More hostvars will appear. The inventory plugins name hostvars differently
 that the contrib scripts did. To maintain backward compatibility,
@@ -87,7 +126,14 @@ Caution: if you do not have `overwrite_vars` set
 to True and you _downgrade_ the version of Ansible that an import runs in,
 this will leave some stale hostvars.
 
-### Host names
+Some hostvars will be lost, because of general deprecation needs.
+
+ - ec2, see https://github.com/ansible/ansible/issues/52358
+ - gce (see https://github.com/ansible/ansible/issues/51884)
+   - `gce_uuid` this came from libcloud and isn't a true GCP field
+     inventory plugins have moved away from libcloud
+
+#### Host names
 
 Host names might change, but tracking host identity via `instance_id`
 will still be reliable.
